@@ -173,6 +173,13 @@ curl -sS "$BASE/site/index.html"; echo
 site_status /docs/guide.html
 site_status /manual/guide.html
 
+echo "== 28) 下载离线 ZIP（当前修订页面 + 旧址离线入口；不推进修订号）"
+curl -sS -o /tmp/docs-archive.zip -w '  -> HTTP %{http_code}, %{size_download} bytes\n' \
+  "$BASE/download"
+python3 -c "import zipfile; print('\n'.join('  ' + n for n in zipfile.ZipFile('/tmp/docs-archive.zip').namelist()))"
+echo "  解压后打开 index.html 即可离线浏览：unzip -o /tmp/docs-archive.zip -d /tmp/docs-offline"
+curl -sS "$BASE/revision"; echo
+
 echo "== 当前修订号与最终页面集合"
 curl -sS "$BASE/revision"; echo
 curl -sS "$BASE/pages"; echo

@@ -6,10 +6,11 @@ from contextlib import asynccontextmanager
 from typing import Literal
 
 from fastapi import FastAPI, HTTPException
-from fastapi.responses import HTMLResponse, JSONResponse, RedirectResponse
+from fastapi.responses import HTMLResponse, JSONResponse, RedirectResponse, Response
 from pydantic import BaseModel, Field, field_validator
 
 from . import db
+from .archive import ArchiveError, build_archive, load_snapshot
 from .merge import MergeBaselineNotFound, MergeConflict, merge
 from .publish import INDEX, PublishConflict, PublishValidationError, publish
 from .redirects import RedirectValidationError, register_redirect, revoke_redirect
@@ -350,3 +351,38 @@ def serve_site(page_path: str = ""):
         raise HTTPException(status_code=404, detail="page not found")
     finally:
         conn.close()
+
+
+@app.get("/download")
+def download_archive():
+    """下载当前修订的离线 ZIP：页面 + 旧址离线入口。
+
+    页面与跳转取自同一个 SQLite 读事务快照；解压后打开 ``index.html``
+    即可循站内链接浏览，无需运行服务。尚未首次发布返回 404；任一路径
+    无法安全且唯一地映射为归档文件时返回 422 并逐项列出，不输出部分 ZIP。
+    只读接口：不推进修订号，不改写 ``/pages`` 原文、历史快照或 ``/site`` 响应。
+    """
+    conn = db.connect()
+    try:
+        revision, pages, redirects = load_snapshot(conn)
+    finally:
+        conn.close()
+    if revision == 0:
+        return JSONResponse(
+            status_code=404,
+            content={"detail": "no published revision to download", "revision": 0},
+        )
+    try:
+        data = build_archive(pages, redirects)
+    except ArchiveError as exc:
+        return JSONResponse(
+            status_code=422,
+            content={"detail": "archive export failed", "errors": exc.errors},
+        )
+    return Response(
+        content=data,
+        media_type="application/zip",
+        headers={
+            "Content-Disposition": f'attachment; filename="docs-archive-r{revision}.zip"'
+        },
+    )

@@ -60,6 +60,7 @@ uvicorn app.main:app --host 0.0.0.0 --port 8000   # 首次启动自动建表
 | `POST /redirects` | 登记跳转，请求体 `{"path":"/old.html","target":"/real.html"}`；不推进修订号 |
 | `DELETE /redirects` | 撤销跳转，请求体 `{"path":"/old.html"}`；不推进修订号 |
 | `GET /site/{路径}` | 站点读取：真实路径返回 HTML（绝对站内 href 改写指到 `/site` 下）；旧地址 308 指向真实路径；未知路径 404 |
+| `GET /download` | 下载当前修订的离线 ZIP（页面 + 旧址离线入口）；不推进修订号；未发布返回 404 |
 
 ## 页面搬迁（`POST /relocate`）
 
@@ -293,6 +294,49 @@ curl -s -X POST http://localhost:8000/relocate \
 curl -s http://localhost:8000/revision   # {"revision":2}
 ```
 
+## 离线 ZIP 下载（`GET /download`）
+
+`GET /download` 把**当前修订**的完整页面集合与**现行旧址跳转**（取自同一个
+SQLite 读事务快照）打包成 ZIP 返回，`Content-Disposition` 文件名形如
+`docs-archive-r9.zip`。解压后直接打开 `index.html`，无需运行服务即可循站内
+链接浏览：
+
+- **页面落盘**：`/index.html` → 归档根部 `index.html`，`/docs/guide.html` →
+  `docs/guide.html`，依此类推（ZIP 内一律为正斜杠相对路径）。
+- **链接改写**：页面内真正的 `<a href>` 中，绝对（`/a.html`）、相对
+  （`b.html`、`../x.html`）与目录形式（`/docs/`）的站内链接一律改写为
+  **归档内真实文件的相对地址**——目录形式指向该目录的 `index.html` 文件，
+  浏览器从文件系统打开也能到达；查询串与 `#片段` 原文保留。外部链接、
+  纯片段、纯查询、非链接内容与其他属性（含属性值里形似 `href=` 的文本）
+  一律不改。
+- **旧址离线入口**：每个现行跳转 `旧地址 -> 真实页` 在旧地址对应的归档位置
+  生成一个入口 HTML，打开时通过
+  `location.replace(目标 + location.search + location.hash)` 直达真实页并
+  **保留查询串与片段**；`<meta http-equiv="refresh">` 与 `<a>` 是禁用脚本时
+  的兜底。
+- **明确错误，不输出部分 ZIP**：任一页面/旧址路径无法安全且唯一地映射为
+  归档文件（`..` 越过站点根、含危险字符、规范化后撞名、文件与目录前缀冲突
+  等），或站内链接无法落盘时，返回 `422` 并逐项列出（与链接校验相同的
+  `source`/`target`/`reason` 形状），不产出 ZIP。
+- **尚未首次发布**（revision 0）返回 `404`。
+- **只读**：下载不推进修订号，不改写 `/pages` 原文、历史修订快照或
+  `/site` 响应；同一快照重复下载得到字节一致的 ZIP。
+
+```bash
+# 下载（按 Content-Disposition 保存为 docs-archive-rN.zip）
+curl -sS -OJ http://localhost:8000/download
+# 或指定文件名
+curl -sS -o docs-archive.zip http://localhost:8000/download
+
+# 解压后用浏览器打开入口页即可离线浏览
+unzip -o docs-archive.zip -d docs-offline
+open docs-offline/index.html        # macOS；Linux 用 xdg-open，Windows 直接双击
+
+# 尚未发布时返回明确错误
+curl -sS http://localhost:8000/download
+# {"detail":"no published revision to download","revision":0}
+```
+
 ## 并行变更合入（`POST /merge`）
 
 同一文档包的不同客户端可能从**同一个旧修订分别改动**。`/merge` 接收**基线修订号**
@@ -424,8 +468,9 @@ app/
   relocate.py    # 单写事务：页面搬迁、站内 href 改写（沿用 linkcheck/htmlrewrite）、旧地址跳转联动、整包校验、新修订
   redirects.py   # 旧地址跳转：登记/撤销（不推进修订号）、发布/合入/搬迁共用的跳转守护
   site.py        # /site 输出改写：绝对站内 href 加 /site 前缀（仅作用于读取响应，不改存储正文）
-  main.py        # FastAPI 路由与请求模型（/publish、/merge、/relocate、/redirects 与 /site 站点读取）
-tests/          # pytest 端到端 + 链接解析/搬迁改写/并行合入/旧地址跳转/站点输出改写单测
+  archive.py     # 离线 ZIP 归档：同一读事务快照取当前页面与旧址跳转、站内 href 落盘改写、旧址离线入口、安全唯一映射检查
+  main.py        # FastAPI 路由与请求模型（/publish、/merge、/relocate、/redirects、/site 站点读取与 /download 离线下载）
+tests/          # pytest 端到端 + 链接解析/搬迁改写/并行合入/旧地址跳转/站点输出改写/离线下载单测
 Dockerfile
 docker-compose.yml
 entrypoint.sh   # 启动时初始化数据库再拉起 uvicorn
