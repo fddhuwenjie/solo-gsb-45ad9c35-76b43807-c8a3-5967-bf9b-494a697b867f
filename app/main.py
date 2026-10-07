@@ -5,11 +5,12 @@ from __future__ import annotations
 from contextlib import asynccontextmanager
 from typing import Literal
 
-from fastapi import FastAPI, HTTPException
+from fastapi import FastAPI, HTTPException, Response
 from fastapi.responses import HTMLResponse, JSONResponse, RedirectResponse
 from pydantic import BaseModel, Field, field_validator
 
 from . import db
+from .archive import ArchiveMappingError, ArchiveNotPublished, build_archive
 from .merge import MergeBaselineNotFound, MergeConflict, merge
 from .publish import INDEX, PublishConflict, PublishValidationError, publish
 from .redirects import RedirectValidationError, register_redirect, revoke_redirect
@@ -316,6 +317,40 @@ def revoke_redirect_endpoint(req: RedirectRevokeRequest):
         return {"revoked": True, "path": req.path, "revision": revision}
     finally:
         conn.close()
+
+
+@app.get("/archive")
+def download_archive():
+    """下载当前发布内容的离线 ZIP 归档。
+
+    从同一数据库快照取得当前修订的页面与现行旧址跳转：页面内存内改写站内
+    href 为归档内相对地址（查询串与 ``#片段`` 保留），旧地址生成离线入口页
+    （打开时直达真实页并保留查询串与片段）。解压后打开 ``index.html`` 即可
+    循站内链接浏览，无需运行服务。只读操作：不推进修订号，不改写数据库正文，
+    ``/pages``、历史快照与 ``/site`` 响应均不受影响。
+    """
+    conn = db.connect()
+    try:
+        revision, payload = build_archive(conn)
+    except ArchiveNotPublished as exc:
+        return JSONResponse(
+            status_code=409,
+            content={"detail": str(exc), "revision": 0},
+        )
+    except ArchiveMappingError as exc:
+        return JSONResponse(
+            status_code=422,
+            content={"detail": "archive mapping failed", "errors": exc.errors},
+        )
+    finally:
+        conn.close()
+    return Response(
+        content=payload,
+        media_type="application/zip",
+        headers={
+            "Content-Disposition": f'attachment; filename="docs-archive-r{revision}.zip"'
+        },
+    )
 
 
 @app.get("/site")

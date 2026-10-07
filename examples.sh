@@ -173,6 +173,11 @@ curl -sS "$BASE/site/index.html"; echo
 site_status /docs/guide.html
 site_status /manual/guide.html
 
+echo "== 28) 下载离线归档 ZIP（只读，不推进修订号）：解压后打开 index.html 即可离线浏览"
+curl -sS -o /tmp/docs-archive.zip -w '  -> HTTP %{http_code}, %{size_download} bytes\n' "$BASE/archive"
+unzip -l /tmp/docs-archive.zip 2>/dev/null || true   # 页面 + 旧址离线入口（如 docs/guide.html）
+curl -sS "$BASE/revision"; echo
+
 echo "== 当前修订号与最终页面集合"
 curl -sS "$BASE/revision"; echo
 curl -sS "$BASE/pages"; echo

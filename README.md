@@ -60,6 +60,7 @@ uvicorn app.main:app --host 0.0.0.0 --port 8000   # 首次启动自动建表
 | `POST /redirects` | 登记跳转，请求体 `{"path":"/old.html","target":"/real.html"}`；不推进修订号 |
 | `DELETE /redirects` | 撤销跳转，请求体 `{"path":"/old.html"}`；不推进修订号 |
 | `GET /site/{路径}` | 站点读取：真实路径返回 HTML（绝对站内 href 改写指到 `/site` 下）；旧地址 308 指向真实路径；未知路径 404 |
+| `GET /archive` | 下载当前发布内容的离线 ZIP（页面 + 旧址离线入口）；未首次发布返回 409，路径无法安全且唯一映射时返回 422 |
 
 ## 页面搬迁（`POST /relocate`）
 
@@ -293,6 +294,55 @@ curl -s -X POST http://localhost:8000/relocate \
 curl -s http://localhost:8000/revision   # {"revision":2}
 ```
 
+## 离线归档下载（`GET /archive`）
+
+把**当前修订的页面**与**现行旧址跳转**从**同一个数据库快照**打包成 ZIP 下载；
+解压后直接打开 `index.html`，即可循站内链接浏览整个文档包，无需运行服务：
+
+```bash
+# 下载（Content-Disposition 文件名按修订号区分，如 docs-archive-r2.zip）
+curl -sS -o docs-archive.zip http://localhost:8000/archive
+
+# 解压后打开入口页即可离线浏览
+unzip -d docs-offline docs-archive.zip
+xdg-open docs-offline/index.html        # macOS: open docs-offline/index.html
+```
+
+归档内容与改写规则：
+
+- **页面**：`/a/b.html` 存为归档文件 `a/b.html`。页面内**真正的锚点 href**——
+  绝对（`/x.html`）、相对（`../x.html`）与目录形式（`/docs/`）——一律改写为
+  归档内真实文件的相对地址（如首页的 `/docs/guide.html?lang=zh#intro` 变为
+  `docs/guide.html?lang=zh#intro`），**查询串与 `#片段` 原文保留**；
+  纯片段（`#x`）、纯查询（`?x`）、外部链接与非链接 HTML（正文、注释、其他
+  标签及属性，包括属性值里形似 `href=` 的文本）一律不改——与 `/site` 输出、
+  `/relocate` 共用同一套字节级 href 改写。
+- **旧址离线入口**：每条现行跳转（旧地址 -> 真实页面）在旧地址的归档位置生成
+  一个入口页，打开时经 `location.replace(目标 + location.search + location.hash)`
+  **直达真实页的归档文件并保留查询串与片段**；另附 `meta refresh` 与可点击
+  链接作为无脚本回退。
+- **安全且唯一**：任一页面/跳转路径无法安全映射为归档文件（含 `..`、`.`、
+  空段、目录形式、反斜杠），或不同路径映射到同一归档文件（含大小写不敏感
+  文件系统上的冲突、文件与目录前缀冲突）时返回 `422` 并逐项说明，
+  **不输出部分 ZIP**。
+- **只读**：下载不推进修订号，不改写数据库正文；`/pages`、历史修订快照与
+  `/site` 响应均不受影响。尚未首次发布（revision 0）时返回 `409`。
+
+```bash
+# 尚未首次发布 -> 409
+curl -sS http://localhost:8000/archive
+# {"detail":"not published yet: archive is available after the first publish","revision":0}
+
+# 路径无法安全且唯一地映射（如存在 /../evil.html 页面）-> 422，不输出部分 ZIP
+curl -sS http://localhost:8000/archive
+# {"detail":"archive mapping failed","errors":[{"source":"","target":"/../evil.html",
+#   "reason":"path cannot be safely mapped to an archive file"}]}
+
+# 下载是只读操作：修订号不变
+curl -sS -o docs-archive.zip http://localhost:8000/archive
+curl -sS http://localhost:8000/revision            # {"revision":2}
+```
+
 ## 并行变更合入（`POST /merge`）
 
 同一文档包的不同客户端可能从**同一个旧修订分别改动**。`/merge` 接收**基线修订号**
@@ -424,8 +474,9 @@ app/
   relocate.py    # 单写事务：页面搬迁、站内 href 改写（沿用 linkcheck/htmlrewrite）、旧地址跳转联动、整包校验、新修订
   redirects.py   # 旧地址跳转：登记/撤销（不推进修订号）、发布/合入/搬迁共用的跳转守护
   site.py        # /site 输出改写：绝对站内 href 加 /site 前缀（仅作用于读取响应，不改存储正文）
-  main.py        # FastAPI 路由与请求模型（/publish、/merge、/relocate、/redirects 与 /site 站点读取）
-tests/          # pytest 端到端 + 链接解析/搬迁改写/并行合入/旧地址跳转/站点输出改写单测
+  archive.py     # 离线归档下载：同一只读快照打包当前页面与旧址跳转，站内 href 改写为归档内相对地址，旧址生成离线入口（不推进修订号）
+  main.py        # FastAPI 路由与请求模型（/publish、/merge、/relocate、/redirects、/archive 与 /site 站点读取）
+tests/          # pytest 端到端 + 链接解析/搬迁改写/并行合入/旧地址跳转/站点输出改写/离线归档下载单测
 Dockerfile
 docker-compose.yml
 entrypoint.sh   # 启动时初始化数据库再拉起 uvicorn
